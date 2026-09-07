@@ -8,8 +8,67 @@ PROJECT_DIR="${ROOT_DIR}/runtime_project"
 DEFAULT_BUILD_DIR="${PROJECT_DIR}/build"
 TASKS_ROOT="${ROOT_DIR}/workspace/tasks"
 DEP_ROOT="${ROOT_DIR}/.deps/sdl2-image/root/usr"
-PKG_CONFIG_PATH_VALUE="${DEP_ROOT}/lib/x86_64-linux-gnu/pkgconfig"
-LIB_DIR="${DEP_ROOT}/lib/x86_64-linux-gnu"
+
+resolve_local_sdl_pkgconfig_dir() {
+    local candidates=(
+        "${DEP_ROOT}/lib/pkgconfig"
+        "${DEP_ROOT}/lib/x86_64-linux-gnu/pkgconfig"
+        "${DEP_ROOT}/lib/aarch64-linux-gnu/pkgconfig"
+        "${DEP_ROOT}/lib/arm64-linux-gnu/pkgconfig"
+        "${DEP_ROOT}/local/lib/pkgconfig"
+    )
+
+    local candidate
+    for candidate in "${candidates[@]}"; do
+        if [[ -f "${candidate}/SDL2_image.pc" ]]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+resolve_local_sdl_lib_dir() {
+    local pkg_dir
+    pkg_dir="$(resolve_local_sdl_pkgconfig_dir || true)"
+    if [[ -n "${pkg_dir}" ]]; then
+        printf '%s\n' "$(dirname "${pkg_dir}")"
+        return 0
+    fi
+
+    return 1
+}
+
+detect_cpu_count() {
+    if command -v nproc >/dev/null 2>&1; then
+        nproc
+    elif command -v sysctl >/dev/null 2>&1; then
+        sysctl -n hw.ncpu 2>/dev/null || echo 1
+    else
+        echo 1
+    fi
+}
+
+resolve_homebrew_pkgconfig_dirs() {
+    local candidates=(
+        "/opt/homebrew/lib/pkgconfig"
+        "/usr/local/lib/pkgconfig"
+        "/opt/local/lib/pkgconfig"
+    )
+    
+    local dirs=()
+    local candidate
+    for candidate in "${candidates[@]}"; do
+        if [[ -d "${candidate}" ]]; then
+            dirs+=("${candidate}")
+        fi
+    done
+    
+    if [[ ${#dirs[@]} -gt 0 ]]; then
+        printf '%s\n' "$(IFS=:; echo "${dirs[*]}")"
+    fi
+}
 
 sync_env_aliases() {
     if [[ -n "${LVGL_PAGE:-}" && -z "${M1_PAGE:-}" ]]; then
@@ -46,10 +105,27 @@ sync_env_aliases() {
 }
 
 env_with_local_sdl() {
-    if [[ -f "${PKG_CONFIG_PATH_VALUE}/SDL2_image.pc" ]]; then
+    local pkg_config_path_value="$(resolve_local_sdl_pkgconfig_dir || true)"
+    local lib_dir="$(resolve_local_sdl_lib_dir || true)"
+    local homebrew_pkg_config="$(resolve_homebrew_pkgconfig_dirs || true)"
+    
+    # Build PKG_CONFIG_PATH with local SDL first, then Homebrew, then existing paths
+    local pkg_config_path="${pkg_config_path_value}"
+    if [[ -n "${homebrew_pkg_config}" ]]; then
+        if [[ -n "${pkg_config_path}" ]]; then
+            pkg_config_path="${pkg_config_path}:${homebrew_pkg_config}"
+        else
+            pkg_config_path="${homebrew_pkg_config}"
+        fi
+    fi
+    if [[ -n "${PKG_CONFIG_PATH:-}" ]]; then
+        pkg_config_path="${pkg_config_path:+${pkg_config_path}:}${PKG_CONFIG_PATH}"
+    fi
+
+    if [[ -n "${pkg_config_path}" || -n "${lib_dir}" ]]; then
         env \
-            PKG_CONFIG_PATH="${PKG_CONFIG_PATH_VALUE}${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}" \
-            LD_LIBRARY_PATH="${LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+            ${pkg_config_path:+PKG_CONFIG_PATH="${pkg_config_path}"} \
+            ${lib_dir:+LD_LIBRARY_PATH="${lib_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"} \
             "$@"
         return
     fi
@@ -194,7 +270,7 @@ build() {
     local build_dir
     resolve_task_context
     build_dir="$(current_build_dir)"
-    env_with_local_sdl cmake --build "${build_dir}" -j"$(nproc)"
+    env_with_local_sdl cmake --build "${build_dir}" -j"$(detect_cpu_count)"
 }
 
 run_gui() {
